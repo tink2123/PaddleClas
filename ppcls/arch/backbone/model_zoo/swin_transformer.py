@@ -15,6 +15,7 @@
 
 import numpy as np
 import paddle
+from paddle import ParamAttr
 import paddle.nn as nn
 import paddle.nn.functional as F
 from paddle.nn.initializer import TruncatedNormal, Constant
@@ -545,7 +546,9 @@ class PatchEmbed(nn.Layer):
                  patch_size=4,
                  in_chans=3,
                  embed_dim=96,
-                 norm_layer=None):
+                 norm_layer=None,
+                 lr_mult=1.0,
+                 data_format="NCHW"):
         super().__init__()
         img_size = to_2tuple(img_size)
         patch_size = to_2tuple(patch_size)
@@ -561,19 +564,25 @@ class PatchEmbed(nn.Layer):
         self.embed_dim = embed_dim
 
         self.proj = nn.Conv2D(
-            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+            in_chans, embed_dim, kernel_size=patch_size, stride=patch_size, \
+                weight_attr=ParamAttr(learning_rate=lr_mult),
+                bias_attr=False,
+                data_format=data_format)
         if norm_layer is not None:
             self.norm = norm_layer(embed_dim)
         else:
             self.norm = None
+        self.data_format = data_format
 
     def forward(self, x):
         B, C, H, W = x.shape
         # TODO (littletomatodonkey), uncomment the line will cause failure of jit.save
         # assert [H, W] == self.img_size[:2], "Input image size ({H}*{W}) doesn't match model ({}*{}).".format(H, W, self.img_size[0], self.img_size[1])
         x = self.proj(x)
-
-        x = x.flatten(2).transpose([0, 2, 1])  # B Ph*Pw C
+        if self.data_format == 'NCHW':
+            x = x.flatten(2).transpose([0, 2, 1])  # B Ph*Pw C
+        elif self.data_format == 'NHWC':
+            x = x.flatten(1, 2)
         if self.norm is not None:
             x = self.norm(x)
         return x
@@ -632,6 +641,9 @@ class SwinTransformer(nn.Layer):
                  ape=False,
                  patch_norm=True,
                  use_checkpoint=False,
+                 lr_mult=1.0,
+                 data_format="NCHW",
+                 input_image_channel=3,
                  **kwargs):
         super(SwinTransformer, self).__init__()
 
@@ -647,9 +659,11 @@ class SwinTransformer(nn.Layer):
         self.patch_embed = PatchEmbed(
             img_size=img_size,
             patch_size=patch_size,
-            in_chans=in_chans,
+            in_chans=input_image_channel,
             embed_dim=embed_dim,
-            norm_layer=norm_layer if self.patch_norm else None)
+            norm_layer=norm_layer if self.patch_norm else None,
+            lr_mult=lr_mult,
+            data_format=data_format)
         num_patches = self.patch_embed.num_patches
         patches_resolution = self.patch_embed.patches_resolution
         self.patches_resolution = patches_resolution
@@ -696,6 +710,7 @@ class SwinTransformer(nn.Layer):
             num_classes) if self.num_classes > 0 else nn.Identity()
 
         self.apply(self._init_weights)
+        self.data_format = data_format
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -714,15 +729,19 @@ class SwinTransformer(nn.Layer):
 
         for layer in self.layers:
             x = layer(x)
-
+        
         x = self.norm(x)  # B L C
         x = self.avgpool(x.transpose([0, 2, 1]))  # B C 1
         x = paddle.flatten(x, 1)
         return x
 
     def forward(self, x):
-        x = self.forward_features(x)
-        x = self.head(x)
+        with paddle.static.amp.fp16_guard():
+            if self.data_format == "NHWC":
+                x = paddle.transpose(x, [0, 2, 3, 1])
+                x.stop_gradient = True
+            x = self.forward_features(x)
+            x = self.head(x)
         return x
 
     def flops(self):

@@ -65,7 +65,9 @@ class ConvBNLayer(TheseusLayer):
                  filter_size,
                  stride=1,
                  groups=1,
-                 act="relu"):
+                 act="relu",
+                 lr_mult=1.0,
+                 data_format="NCHW"):
         super().__init__()
 
         self.conv = nn.Conv2D(
@@ -75,8 +77,13 @@ class ConvBNLayer(TheseusLayer):
             stride=stride,
             padding=(filter_size - 1) // 2,
             groups=groups,
-            bias_attr=False)
-        self.bn = nn.BatchNorm(num_filters, act=None)
+            weight_attr=ParamAttr(learning_rate=lr_mult),
+            bias_attr=False,
+            data_format=data_format)
+        self.bn = nn.BatchNorm(num_filters, act=None, \
+            param_attr=ParamAttr(learning_rate=lr_mult),
+            bias_attr=ParamAttr(learning_rate=lr_mult),
+            data_layout=data_format)
         self.act = _create_act(act)
 
     def forward(self, x):
@@ -92,7 +99,9 @@ class BottleneckBlock(TheseusLayer):
                  num_filters,
                  has_se,
                  stride=1,
-                 downsample=False):
+                 downsample=False,
+                 lr_mult=1.0,
+                 data_format="NCHW"):
         super().__init__()
 
         self.has_se = has_se
@@ -102,31 +111,40 @@ class BottleneckBlock(TheseusLayer):
             num_channels=num_channels,
             num_filters=num_filters,
             filter_size=1,
-            act="relu")
+            act="relu",
+            lr_mult=lr_mult,
+            data_format=data_format)
         self.conv2 = ConvBNLayer(
             num_channels=num_filters,
             num_filters=num_filters,
             filter_size=3,
             stride=stride,
-            act="relu")
+            act="relu",
+            lr_mult=lr_mult,
+            data_format=data_format)
         self.conv3 = ConvBNLayer(
             num_channels=num_filters,
             num_filters=num_filters * 4,
             filter_size=1,
-            act=None)
+            act=None,
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         if self.downsample:
             self.conv_down = ConvBNLayer(
                 num_channels=num_channels,
                 num_filters=num_filters * 4,
                 filter_size=1,
-                act=None)
+                act=None,
+                lr_mult=lr_mult,
+                data_format=data_format)
 
         if self.has_se:
             self.se = SELayer(
                 num_channels=num_filters * 4,
                 num_filters=num_filters * 4,
-                reduction_ratio=16)
+                reduction_ratio=16,
+                data_format=data_format)
         self.relu = nn.ReLU()
 
     def forward(self, x, res_dict=None):
@@ -144,7 +162,7 @@ class BottleneckBlock(TheseusLayer):
 
 
 class BasicBlock(nn.Layer):
-    def __init__(self, num_channels, num_filters, has_se=False):
+    def __init__(self, num_channels, num_filters, has_se=False, lr_mult=1.0, data_format='NCHW'):
         super().__init__()
 
         self.has_se = has_se
@@ -154,19 +172,24 @@ class BasicBlock(nn.Layer):
             num_filters=num_filters,
             filter_size=3,
             stride=1,
-            act="relu")
+            act="relu",
+            lr_mult=lr_mult,
+            data_format=data_format)
         self.conv2 = ConvBNLayer(
             num_channels=num_filters,
             num_filters=num_filters,
             filter_size=3,
             stride=1,
-            act=None)
+            act=None,
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         if self.has_se:
             self.se = SELayer(
                 num_channels=num_filters,
                 num_filters=num_filters,
-                reduction_ratio=16)
+                reduction_ratio=16,
+                data_format=data_format)
         self.relu = nn.ReLU()
 
     def forward(self, x):
@@ -183,10 +206,10 @@ class BasicBlock(nn.Layer):
 
 
 class SELayer(TheseusLayer):
-    def __init__(self, num_channels, num_filters, reduction_ratio):
+    def __init__(self, num_channels, num_filters, reduction_ratio, data_format='NCHW'):
         super().__init__()
 
-        self.avg_pool = nn.AdaptiveAvgPool2D(1)
+        self.avg_pool = nn.AdaptiveAvgPool2D(1, data_format=data_format)
 
         self._num_channels = num_channels
 
@@ -218,7 +241,7 @@ class SELayer(TheseusLayer):
 
 
 class Stage(TheseusLayer):
-    def __init__(self, num_modules, num_filters, has_se=False):
+    def __init__(self, num_modules, num_filters, has_se=False, lr_mult=1.0, data_format="NCHW"):
         super().__init__()
 
         self._num_modules = num_modules
@@ -227,7 +250,7 @@ class Stage(TheseusLayer):
         for i in range(num_modules):
             self.stage_func_list.append(
                 HighResolutionModule(
-                    num_filters=num_filters, has_se=has_se))
+                    num_filters=num_filters, has_se=has_se, lr_mult=lr_mult, data_format=data_format))
 
     def forward(self, x, res_dict=None):
         x = x
@@ -237,7 +260,7 @@ class Stage(TheseusLayer):
 
 
 class HighResolutionModule(TheseusLayer):
-    def __init__(self, num_filters, has_se=False):
+    def __init__(self, num_filters, has_se=False, lr_mult=1.0, data_format="NCHW"):
         super().__init__()
 
         self.basic_block_list = nn.LayerList()
@@ -248,11 +271,13 @@ class HighResolutionModule(TheseusLayer):
                     BasicBlock(
                         num_channels=num_filters[i],
                         num_filters=num_filters[i],
-                        has_se=has_se) for j in range(4)
+                        has_se=has_se,
+                        lr_mult=lr_mult,
+                        data_format=data_format) for j in range(4)
                 ]))
 
         self.fuse_func = FuseLayers(
-            in_channels=num_filters, out_channels=num_filters)
+            in_channels=num_filters, out_channels=num_filters, lr_mult=lr_mult, data_format=data_format)
 
     def forward(self, x, res_dict=None):
         out = []
@@ -266,7 +291,7 @@ class HighResolutionModule(TheseusLayer):
 
 
 class FuseLayers(TheseusLayer):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, lr_mult=1.0, data_format="NCHW"):
         super().__init__()
 
         self._actual_ch = len(in_channels)
@@ -283,7 +308,9 @@ class FuseLayers(TheseusLayer):
                             num_filters=out_channels[i],
                             filter_size=1,
                             stride=1,
-                            act=None))
+                            act=None,
+                            lr_mult=lr_mult,
+                            data_format=data_format))
                 elif j < i:
                     pre_num_filters = in_channels[j]
                     for k in range(i - j):
@@ -294,7 +321,9 @@ class FuseLayers(TheseusLayer):
                                     num_filters=out_channels[i],
                                     filter_size=3,
                                     stride=2,
-                                    act=None))
+                                    act=None,
+                                    lr_mult=lr_mult,
+                                    data_format=data_format))
                             pre_num_filters = out_channels[i]
                         else:
                             self.residual_func_list.append(
@@ -303,8 +332,12 @@ class FuseLayers(TheseusLayer):
                                     num_filters=out_channels[j],
                                     filter_size=3,
                                     stride=2,
-                                    act="relu"))
+                                    act="relu",
+                                    lr_mult=lr_mult,
+                                    data_format=data_format))
                             pre_num_filters = out_channels[j]
+        
+        self.data_format = data_format
 
     def forward(self, x, res_dict=None):
         out = []
@@ -316,7 +349,7 @@ class FuseLayers(TheseusLayer):
                     xj = self.residual_func_list[residual_func_idx](x[j])
                     residual_func_idx += 1
 
-                    xj = upsample(xj, scale_factor=2**(j - i), mode="nearest")
+                    xj = upsample(xj, scale_factor=2**(j - i), mode="nearest", data_format=self.data_format)
                     residual = paddle.add(x=residual, y=xj)
                 elif j < i:
                     xj = x[j]
@@ -336,7 +369,9 @@ class LastClsOut(TheseusLayer):
     def __init__(self,
                  num_channel_list,
                  has_se,
-                 num_filters_list=[32, 64, 128, 256]):
+                 num_filters_list=[32, 64, 128, 256],
+                 lr_mult=1.0,
+                 data_format="NCHW"):
         super().__init__()
 
         self.func_list = nn.LayerList()
@@ -346,7 +381,9 @@ class LastClsOut(TheseusLayer):
                     num_channels=num_channel_list[idx],
                     num_filters=num_filters_list[idx],
                     has_se=has_se,
-                    downsample=True))
+                    downsample=True,
+                    lr_mult=lr_mult,
+                    data_format=data_format))
 
     def forward(self, x, res_dict=None):
         out = []
@@ -367,7 +404,7 @@ class HRNet(TheseusLayer):
         model: nn.Layer. Specific HRNet model depends on args.
     """
 
-    def __init__(self, width=18, has_se=False, class_num=1000):
+    def __init__(self, width=18, has_se=False, class_num=1000, lr_mult=1.0, data_format="NCHW", input_image_channel=3):
         super().__init__()
 
         self.width = width
@@ -381,18 +418,22 @@ class HRNet(TheseusLayer):
         ]
 
         self.conv_layer1_1 = ConvBNLayer(
-            num_channels=3,
+            num_channels=input_image_channel,
             num_filters=64,
             filter_size=3,
             stride=2,
-            act="relu")
+            act="relu",
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         self.conv_layer1_2 = ConvBNLayer(
             num_channels=64,
             num_filters=64,
             filter_size=3,
             stride=2,
-            act="relu")
+            act="relu",
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         self.layer1 = nn.Sequential(*[
             BottleneckBlock(
@@ -400,40 +441,48 @@ class HRNet(TheseusLayer):
                 num_filters=64,
                 has_se=has_se,
                 stride=1,
-                downsample=True if i == 0 else False) for i in range(4)
+                downsample=True if i == 0 else False,
+                lr_mult=lr_mult,
+                data_format=data_format) for i in range(4)
         ])
 
         self.conv_tr1_1 = ConvBNLayer(
-            num_channels=256, num_filters=width, filter_size=3)
+            num_channels=256, num_filters=width, filter_size=3, lr_mult=lr_mult, data_format=data_format)
         self.conv_tr1_2 = ConvBNLayer(
-            num_channels=256, num_filters=width * 2, filter_size=3, stride=2)
+            num_channels=256, num_filters=width * 2, filter_size=3, stride=2, lr_mult=lr_mult, data_format=data_format)
 
         self.st2 = Stage(
-            num_modules=1, num_filters=channels_2, has_se=self.has_se)
+            num_modules=1, num_filters=channels_2, has_se=self.has_se, lr_mult=lr_mult, data_format=data_format)
 
         self.conv_tr2 = ConvBNLayer(
             num_channels=width * 2,
             num_filters=width * 4,
             filter_size=3,
-            stride=2)
+            stride=2,
+            lr_mult=lr_mult,
+            data_format=data_format)
         self.st3 = Stage(
-            num_modules=4, num_filters=channels_3, has_se=self.has_se)
+            num_modules=4, num_filters=channels_3, has_se=self.has_se, lr_mult=lr_mult, data_format=data_format)
 
         self.conv_tr3 = ConvBNLayer(
             num_channels=width * 4,
             num_filters=width * 8,
             filter_size=3,
-            stride=2)
+            stride=2,
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         self.st4 = Stage(
-            num_modules=3, num_filters=channels_4, has_se=self.has_se)
+            num_modules=3, num_filters=channels_4, has_se=self.has_se, lr_mult=lr_mult, data_format=data_format)
 
         # classification
         num_filters_list = [32, 64, 128, 256]
         self.last_cls = LastClsOut(
             num_channel_list=channels_4,
             has_se=self.has_se,
-            num_filters_list=num_filters_list)
+            num_filters_list=num_filters_list,
+            lr_mult=lr_mult,
+            data_format=data_format)
 
         last_num_filters = [256, 512, 1024]
         self.cls_head_conv_list = nn.LayerList()
@@ -443,12 +492,14 @@ class HRNet(TheseusLayer):
                     num_channels=num_filters_list[idx] * 4,
                     num_filters=last_num_filters[idx],
                     filter_size=3,
-                    stride=2))
+                    stride=2,
+                    lr_mult=lr_mult,
+                    data_format=data_format))
 
         self.conv_last = ConvBNLayer(
-            num_channels=1024, num_filters=2048, filter_size=1, stride=1)
+            num_channels=1024, num_filters=2048, filter_size=1, stride=1, lr_mult=lr_mult, data_format=data_format)
 
-        self.avg_pool = nn.AdaptiveAvgPool2D(1)
+        self.avg_pool = nn.AdaptiveAvgPool2D(1, data_format=data_format)
 
         stdv = 1.0 / math.sqrt(2048 * 1.0)
 
@@ -457,34 +508,43 @@ class HRNet(TheseusLayer):
             class_num,
             weight_attr=ParamAttr(initializer=Uniform(-stdv, stdv)))
 
+        self.data_format = data_format
+
     def forward(self, x, res_dict=None):
-        x = self.conv_layer1_1(x)
-        x = self.conv_layer1_2(x)
+        with paddle.static.amp.fp16_guard():
+            if self.data_format == "NHWC":
+                x = paddle.transpose(x, [0, 2, 3, 1])
+                x.stop_gradient = True
+            x = self.conv_layer1_1(x)
+            x = self.conv_layer1_2(x)
 
-        x = self.layer1(x)
+            x = self.layer1(x)
 
-        tr1_1 = self.conv_tr1_1(x)
-        tr1_2 = self.conv_tr1_2(x)
-        x = self.st2([tr1_1, tr1_2])
+            tr1_1 = self.conv_tr1_1(x)
+            tr1_2 = self.conv_tr1_2(x)
+            x = self.st2([tr1_1, tr1_2])
 
-        tr2 = self.conv_tr2(x[-1])
-        x.append(tr2)
-        x = self.st3(x)
+            tr2 = self.conv_tr2(x[-1])
+            x.append(tr2)
+            x = self.st3(x)
 
-        tr3 = self.conv_tr3(x[-1])
-        x.append(tr3)
-        x = self.st4(x)
+            tr3 = self.conv_tr3(x[-1])
+            x.append(tr3)
+            x = self.st4(x)
 
-        x = self.last_cls(x)
+            x = self.last_cls(x)
 
-        y = x[0]
-        for idx in range(3):
-            y = paddle.add(x[idx + 1], self.cls_head_conv_list[idx](y))
+            y = x[0]
+            for idx in range(3):
+                y = paddle.add(x[idx + 1], self.cls_head_conv_list[idx](y))
 
-        y = self.conv_last(y)
-        y = self.avg_pool(y)
-        y = paddle.reshape(y, shape=[-1, y.shape[1]])
-        y = self.fc(y)
+            y = self.conv_last(y)
+            y = self.avg_pool(y)
+            if self.data_format == 'NCHW':
+                y = paddle.reshape(y, shape=[-1, y.shape[1]])
+            elif self.data_format == 'NHWC':
+                y = paddle.reshape(y, shape=[-1, y.shape[-1]])
+            y = self.fc(y)
         return y
 
 

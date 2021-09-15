@@ -45,7 +45,17 @@ def train_epoch(trainer, epoch_id, print_batch_step):
                     "flatten_contiguous_range", "greater_than"
             }):
                 out = forward(trainer, batch)
-                loss_dict = trainer.train_loss_func(out, batch[1])
+                if trainer.config["DataLoader"]["Train"]["dataset"].get(
+                        "batch_transform_ops", None):
+                    loss_dict = trainer.train_loss_func(out, batch[1:])
+                else:
+                    loss_dict = trainer.train_loss_func(out, batch[1])
+                # loss_type = list(trainer.config["Loss"]["Train"][0])[0]
+                # if loss_type == 'MixCELoss':
+                #     loss_dict = trainer.train_loss_func(out, batch[1:])
+                # else:
+                #     loss_dict = trainer.train_loss_func(out, batch[1])
+                
         else:
             out = forward(trainer, batch)
 

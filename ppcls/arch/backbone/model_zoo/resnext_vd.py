@@ -57,12 +57,14 @@ class ConvBNLayer(nn.Layer):
             groups=1,
             is_vd_mode=False,
             act=None,
-            name=None, ):
+            name=None,
+            lr_mult=1.0,
+            data_format="NCHW"):
         super(ConvBNLayer, self).__init__()
 
         self.is_vd_mode = is_vd_mode
         self._pool2d_avg = AvgPool2D(
-            kernel_size=2, stride=2, padding=0, ceil_mode=True)
+            kernel_size=2, stride=2, padding=0, ceil_mode=True, data_format=data_format)
         self._conv = Conv2D(
             in_channels=num_channels,
             out_channels=num_filters,
@@ -70,8 +72,9 @@ class ConvBNLayer(nn.Layer):
             stride=stride,
             padding=(filter_size - 1) // 2,
             groups=groups,
-            weight_attr=ParamAttr(name=name + "_weights"),
-            bias_attr=False)
+            weight_attr=ParamAttr(name=name + "_weights", learning_rate=lr_mult),
+            bias_attr=False,
+            data_format=data_format)
         if name == "conv1":
             bn_name = "bn_" + name
         else:
@@ -79,10 +82,11 @@ class ConvBNLayer(nn.Layer):
         self._batch_norm = BatchNorm(
             num_filters,
             act=act,
-            param_attr=ParamAttr(name=bn_name + '_scale'),
-            bias_attr=ParamAttr(bn_name + '_offset'),
+            param_attr=ParamAttr(name=bn_name + '_scale', learning_rate=lr_mult),
+            bias_attr=ParamAttr(bn_name + '_offset', learning_rate=lr_mult),
             moving_mean_name=bn_name + '_mean',
-            moving_variance_name=bn_name + '_variance')
+            moving_variance_name=bn_name + '_variance',
+            data_layout=data_format)
 
     def forward(self, inputs):
         if self.is_vd_mode:
@@ -100,6 +104,8 @@ class BottleneckBlock(nn.Layer):
                  cardinality,
                  shortcut=True,
                  if_first=False,
+                 lr_mult=1.0,
+                 data_format="NCHW",
                  name=None):
         super(BottleneckBlock, self).__init__()
 
@@ -108,6 +114,8 @@ class BottleneckBlock(nn.Layer):
             num_filters=num_filters,
             filter_size=1,
             act='relu',
+            lr_mult=lr_mult,
+            data_format=data_format,
             name=name + "_branch2a")
         self.conv1 = ConvBNLayer(
             num_channels=num_filters,
@@ -116,12 +124,16 @@ class BottleneckBlock(nn.Layer):
             groups=cardinality,
             stride=stride,
             act='relu',
+            lr_mult=lr_mult,
+            data_format=data_format,
             name=name + "_branch2b")
         self.conv2 = ConvBNLayer(
             num_channels=num_filters,
             num_filters=num_filters * 2 if cardinality == 32 else num_filters,
             filter_size=1,
             act=None,
+            lr_mult=lr_mult,
+            data_format=data_format,
             name=name + "_branch2c")
 
         if not shortcut:
@@ -132,6 +144,8 @@ class BottleneckBlock(nn.Layer):
                 filter_size=1,
                 stride=1,
                 is_vd_mode=False if if_first else True,
+                lr_mult=lr_mult,
+                data_format=data_format,
                 name=name + "_branch1")
 
         self.shortcut = shortcut
@@ -152,7 +166,7 @@ class BottleneckBlock(nn.Layer):
 
 
 class ResNeXt(nn.Layer):
-    def __init__(self, layers=50, class_num=1000, cardinality=32):
+    def __init__(self, layers=50, class_num=1000, cardinality=32, data_format="NCHW", input_image_channel=3):
         super(ResNeXt, self).__init__()
 
         self.layers = layers
@@ -176,28 +190,34 @@ class ResNeXt(nn.Layer):
                        1024] if cardinality == 32 else [256, 512, 1024, 2048]
 
         self.conv1_1 = ConvBNLayer(
-            num_channels=3,
+            num_channels=input_image_channel,
             num_filters=32,
             filter_size=3,
             stride=2,
             act='relu',
-            name="conv1_1")
+            name="conv1_1",
+            lr_mult=1.0,
+            data_format=data_format)
         self.conv1_2 = ConvBNLayer(
             num_channels=32,
             num_filters=32,
             filter_size=3,
             stride=1,
             act='relu',
-            name="conv1_2")
+            name="conv1_2",
+            lr_mult=1.0,
+            data_format=data_format)
         self.conv1_3 = ConvBNLayer(
             num_channels=32,
             num_filters=64,
             filter_size=3,
             stride=1,
             act='relu',
-            name="conv1_3")
+            name="conv1_3",
+            lr_mult=1.0,
+            data_format=data_format)
 
-        self.pool2d_max = MaxPool2D(kernel_size=3, stride=2, padding=1)
+        self.pool2d_max = MaxPool2D(kernel_size=3, stride=2, padding=1, data_format=data_format)
 
         self.block_list = []
         for block in range(len(depth)):
@@ -220,11 +240,13 @@ class ResNeXt(nn.Layer):
                         cardinality=self.cardinality,
                         shortcut=shortcut,
                         if_first=block == i == 0,
-                        name=conv_name))
+                        name=conv_name,
+                        lr_mult=1.0,
+                        data_format=data_format))
                 self.block_list.append(bottleneck_block)
                 shortcut = True
 
-        self.pool2d_avg = AdaptiveAvgPool2D(1)
+        self.pool2d_avg = AdaptiveAvgPool2D(1, data_format=data_format)
 
         self.pool2d_avg_channels = num_channels[-1] * 2
 
@@ -237,16 +259,22 @@ class ResNeXt(nn.Layer):
                 initializer=Uniform(-stdv, stdv), name="fc_weights"),
             bias_attr=ParamAttr(name="fc_offset"))
 
+        self.data_format = data_format
+
     def forward(self, inputs):
-        y = self.conv1_1(inputs)
-        y = self.conv1_2(y)
-        y = self.conv1_3(y)
-        y = self.pool2d_max(y)
-        for block in self.block_list:
-            y = block(y)
-        y = self.pool2d_avg(y)
-        y = paddle.reshape(y, shape=[-1, self.pool2d_avg_channels])
-        y = self.out(y)
+        with paddle.static.amp.fp16_guard():
+            if self.data_format == "NHWC":
+                inputs = paddle.transpose(inputs, [0, 2, 3, 1])
+                inputs.stop_gradient = True
+            y = self.conv1_1(inputs)
+            y = self.conv1_2(y)
+            y = self.conv1_3(y)
+            y = self.pool2d_max(y)
+            for block in self.block_list:
+                y = block(y)
+            y = self.pool2d_avg(y)
+            y = paddle.reshape(y, shape=[-1, self.pool2d_avg_channels])
+            y = self.out(y)
         return y
 
 
